@@ -37,6 +37,7 @@ interface GameStore {
   resetGame: () => void;
   setMessage: (message: string, duration?: number) => void;
   clearMessage: () => void;
+  checkAndRefreshDaily: () => void;
 }
 
 const getInitialGameState = (language: Language): GameState => {
@@ -60,59 +61,87 @@ const getInitialStatistics = (): Statistics => ({
   lastPlayDate: '',
 });
 
-const today = getDateString();
+const getGameStorageKey = (language: Language, date: string): string => {
+  return `wordle_game_${date}_${language}`;
+};
 
 const loadGameState = (language: Language): GameState => {
-  const stored = localStorage.getItem(`wordle_game_${today}_${language}`);
+  const today = getDateString();
+  const stored = localStorage.getItem(getGameStorageKey(language, today));
   if (stored) {
     try {
-      return JSON.parse(stored);
+      const parsed = JSON.parse(stored);
+      if (parsed.targetWord && Array.isArray(parsed.guesses)) {
+        return parsed;
+      }
     } catch {
-      return getInitialGameState(language);
+      // 解析失败，返回初始状态
     }
   }
   return getInitialGameState(language);
 };
 
-const savedLanguage = (localStorage.getItem('wordle_language') as Language) || 'en';
-const initialGameState = loadGameState(savedLanguage);
-const initialStats = (() => {
-  const stored = localStorage.getItem('wordle_stats');
-  if (stored) {
-    try {
-      return JSON.parse(stored);
-    } catch {
-      return getInitialStatistics();
-    }
+const loadLanguage = (): Language => {
+  const stored = localStorage.getItem('wordle_language');
+  if (stored && ['en', 'es', 'pinyin'].includes(stored)) {
+    return stored as Language;
   }
-  return getInitialStatistics();
-})();
-
-const saveGameState = (state: GameState) => {
-  localStorage.setItem(
-    `wordle_game_${getDateString()}_${state.language}`,
-    JSON.stringify(state)
-  );
+  return 'en';
 };
 
-const saveStatistics = (stats: Statistics) => {
-  localStorage.setItem('wordle_stats', JSON.stringify(stats));
+const saveGameState = (state: GameState) => {
+  const today = getDateString();
+  localStorage.setItem(
+    getGameStorageKey(state.language, today),
+    JSON.stringify(state)
+  );
 };
 
 const saveLanguage = (language: Language) => {
   localStorage.setItem('wordle_language', language);
 };
 
+const initialLanguage = loadLanguage();
+const initialGameState = loadGameState(initialLanguage);
+
 export const useGameStore = create<GameStore>()(
   persist(
     (set, get) => ({
       gameState: initialGameState,
-      statistics: initialStats,
+      statistics: getInitialStatistics(),
       message: '',
       showStats: false,
       showHelp: false,
-      showGameOver: false,
+      showGameOver: initialGameState.gameStatus !== 'playing',
       isAnimating: false,
+
+      checkAndRefreshDaily: () => {
+        const { gameState } = get();
+        const today = getDateString();
+        const storedKey = getGameStorageKey(gameState.language, today);
+        const stored = localStorage.getItem(storedKey);
+
+        if (!stored) {
+          const newState = getInitialGameState(gameState.language);
+          set({
+            gameState: newState,
+            showGameOver: false,
+            isAnimating: false,
+          });
+        } else {
+          try {
+            const parsed = JSON.parse(stored);
+            if (parsed.targetWord && Array.isArray(parsed.guesses)) {
+              set({
+                gameState: parsed,
+                showGameOver: parsed.gameStatus !== 'playing',
+              });
+            }
+          } catch {
+            // 解析失败，保持当前状态
+          }
+        }
+      },
 
       setLanguage: (language: Language) => {
         saveLanguage(language);
@@ -124,14 +153,17 @@ export const useGameStore = create<GameStore>()(
       },
 
       addLetter: (letter: string) => {
-        const { gameState, isAnimating } = get();
-        if (isAnimating || gameState.gameStatus !== 'playing') return;
+        const { gameState, isAnimating, checkAndRefreshDaily } = get();
+        checkAndRefreshDaily();
+        const currentState = get().gameState;
 
-        const wordLength = getWordLength(gameState.language);
-        if (gameState.currentGuess.length < wordLength) {
+        if (isAnimating || currentState.gameStatus !== 'playing') return;
+
+        const wordLength = getWordLength(currentState.language);
+        if (currentState.currentGuess.length < wordLength) {
           const newState = {
-            ...gameState,
-            currentGuess: gameState.currentGuess + letter.toLowerCase(),
+            ...currentState,
+            currentGuess: currentState.currentGuess + letter.toLowerCase(),
           };
           saveGameState(newState);
           set({ gameState: newState });
@@ -139,13 +171,16 @@ export const useGameStore = create<GameStore>()(
       },
 
       removeLetter: () => {
-        const { gameState, isAnimating } = get();
-        if (isAnimating || gameState.gameStatus !== 'playing') return;
+        const { gameState, isAnimating, checkAndRefreshDaily } = get();
+        checkAndRefreshDaily();
+        const currentState = get().gameState;
 
-        if (gameState.currentGuess.length > 0) {
+        if (isAnimating || currentState.gameStatus !== 'playing') return;
+
+        if (currentState.currentGuess.length > 0) {
           const newState = {
-            ...gameState,
-            currentGuess: gameState.currentGuess.slice(0, -1),
+            ...currentState,
+            currentGuess: currentState.currentGuess.slice(0, -1),
           };
           saveGameState(newState);
           set({ gameState: newState });
@@ -153,7 +188,10 @@ export const useGameStore = create<GameStore>()(
       },
 
       submitGuess: () => {
-        const { gameState, statistics, isAnimating, setMessage } = get();
+        const { statistics, isAnimating, setMessage, checkAndRefreshDaily } = get();
+        checkAndRefreshDaily();
+        const { gameState } = get();
+
         if (isAnimating || gameState.gameStatus !== 'playing') return;
 
         const wordLength = getWordLength(gameState.language);
@@ -214,7 +252,6 @@ export const useGameStore = create<GameStore>()(
                 newStats.currentStreak = 0;
               }
               newStats.lastPlayDate = today;
-              saveStatistics(newStats);
               set({ statistics: newStats });
             }
 
@@ -257,9 +294,8 @@ export const useGameStore = create<GameStore>()(
       clearMessage: () => set({ message: '' }),
     }),
     {
-      name: 'wordle-store',
+      name: 'wordle-stats',
       partialize: (state) => ({
-        gameState: state.gameState,
         statistics: state.statistics,
       }),
     }
