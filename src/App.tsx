@@ -1,4 +1,4 @@
-import React, { useEffect, useRef } from 'react';
+import React, { useEffect } from 'react';
 import { Header } from './components/Header';
 import { Board } from './components/Board';
 import { Keyboard } from './components/Keyboard';
@@ -10,19 +10,20 @@ import { useGameStore } from './store/useGameStore';
 import { getDateString } from './utils/dailyWord';
 
 const App: React.FC = () => {
-  const { gameState, checkAndRefreshDaily } = useGameStore();
-  const lastDateRef = useRef(getDateString());
+  const { gameState, refreshDailyIfNeeded } = useGameStore();
 
   useEffect(() => {
     document.title = 'Wordle - 猜词游戏';
   }, []);
 
   useEffect(() => {
+    let lastDate = getDateString();
+
     const checkDate = () => {
       const today = getDateString();
-      if (today !== lastDateRef.current) {
-        lastDateRef.current = today;
-        checkAndRefreshDaily();
+      if (today !== lastDate) {
+        lastDate = today;
+        refreshDailyIfNeeded();
       }
     };
 
@@ -40,7 +41,7 @@ const App: React.FC = () => {
       document.removeEventListener('visibilitychange', handleVisibilityChange);
       clearInterval(intervalId);
     };
-  }, [checkAndRefreshDaily]);
+  }, [refreshDailyIfNeeded]);
 
   return (
     <div className="min-h-screen bg-[#121213] text-white flex flex-col">

@@ -20,6 +20,7 @@ export interface GameState {
   gameStatus: GameStatus;
   language: Language;
   keyStatus: Record<string, LetterStatus>;
+  date: string;
 }
 
 export interface Statistics {

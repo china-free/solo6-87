@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import { persist } from 'zustand/middleware';
+import { persist, PersistStorage } from 'zustand/middleware';
 import {
   GameState,
   Statistics,
@@ -37,7 +37,7 @@ interface GameStore {
   resetGame: () => void;
   setMessage: (message: string, duration?: number) => void;
   clearMessage: () => void;
-  checkAndRefreshDaily: () => void;
+  refreshDailyIfNeeded: () => void;
 }
 
 const getInitialGameState = (language: Language): GameState => {
@@ -49,6 +49,7 @@ const getInitialGameState = (language: Language): GameState => {
     gameStatus: 'playing',
     language,
     keyStatus: {},
+    date: getDateString(),
   };
 };
 
@@ -61,26 +62,6 @@ const getInitialStatistics = (): Statistics => ({
   lastPlayDate: '',
 });
 
-const getGameStorageKey = (language: Language, date: string): string => {
-  return `wordle_game_${date}_${language}`;
-};
-
-const loadGameState = (language: Language): GameState => {
-  const today = getDateString();
-  const stored = localStorage.getItem(getGameStorageKey(language, today));
-  if (stored) {
-    try {
-      const parsed = JSON.parse(stored);
-      if (parsed.targetWord && Array.isArray(parsed.guesses)) {
-        return parsed;
-      }
-    } catch {
-      // 解析失败，返回初始状态
-    }
-  }
-  return getInitialGameState(language);
-};
-
 const loadLanguage = (): Language => {
   const stored = localStorage.getItem('wordle_language');
   if (stored && ['en', 'es', 'pinyin'].includes(stored)) {
@@ -89,109 +70,133 @@ const loadLanguage = (): Language => {
   return 'en';
 };
 
-const saveGameState = (state: GameState) => {
-  const today = getDateString();
-  localStorage.setItem(
-    getGameStorageKey(state.language, today),
-    JSON.stringify(state)
-  );
-};
-
 const saveLanguage = (language: Language) => {
   localStorage.setItem('wordle_language', language);
 };
 
+interface PersistedState {
+  gameState: GameState;
+  statistics: Statistics;
+}
+
+const createDateValidatedStorage = () => {
+  return {
+    getItem: (name: string) => {
+      const str = localStorage.getItem(name);
+      if (!str) return null;
+
+      try {
+        const persisted = JSON.parse(str) as { state: PersistedState; version: number };
+        const state = persisted.state;
+        const today = getDateString();
+
+        if (state.gameState && state.gameState.date !== today) {
+          const language = state.gameState.language || 'en';
+          return {
+            ...persisted,
+            state: {
+              gameState: getInitialGameState(language),
+              statistics: state.statistics,
+            },
+          };
+        }
+
+        return persisted;
+      } catch {
+        return null;
+      }
+    },
+    setItem: (name: string, value: unknown) => {
+      localStorage.setItem(name, JSON.stringify(value));
+    },
+    removeItem: (name: string) => {
+      localStorage.removeItem(name);
+    },
+  };
+};
+
 const initialLanguage = loadLanguage();
-const initialGameState = loadGameState(initialLanguage);
 
 export const useGameStore = create<GameStore>()(
   persist(
     (set, get) => ({
-      gameState: initialGameState,
+      gameState: getInitialGameState(initialLanguage),
       statistics: getInitialStatistics(),
       message: '',
       showStats: false,
       showHelp: false,
-      showGameOver: initialGameState.gameStatus !== 'playing',
+      showGameOver: false,
       isAnimating: false,
 
-      checkAndRefreshDaily: () => {
+      refreshDailyIfNeeded: () => {
         const { gameState } = get();
         const today = getDateString();
-        const storedKey = getGameStorageKey(gameState.language, today);
-        const stored = localStorage.getItem(storedKey);
 
-        if (!stored) {
+        if (gameState.date !== today) {
           const newState = getInitialGameState(gameState.language);
           set({
             gameState: newState,
             showGameOver: false,
             isAnimating: false,
           });
-        } else {
-          try {
-            const parsed = JSON.parse(stored);
-            if (parsed.targetWord && Array.isArray(parsed.guesses)) {
-              set({
-                gameState: parsed,
-                showGameOver: parsed.gameStatus !== 'playing',
-              });
-            }
-          } catch {
-            // 解析失败，保持当前状态
-          }
         }
       },
 
       setLanguage: (language: Language) => {
         saveLanguage(language);
-        const newState = loadGameState(language);
-        set({
-          gameState: newState,
-          showGameOver: newState.gameStatus !== 'playing',
-        });
+        const { refreshDailyIfNeeded } = get();
+        refreshDailyIfNeeded();
+
+        const { gameState } = get();
+        if (gameState.language !== language) {
+          const newState = getInitialGameState(language);
+          set({
+            gameState: newState,
+            showGameOver: false,
+          });
+        }
       },
 
       addLetter: (letter: string) => {
-        const { gameState, isAnimating, checkAndRefreshDaily } = get();
-        checkAndRefreshDaily();
-        const currentState = get().gameState;
+        const { isAnimating, refreshDailyIfNeeded } = get();
+        refreshDailyIfNeeded();
 
+        const currentState = get().gameState;
         if (isAnimating || currentState.gameStatus !== 'playing') return;
 
         const wordLength = getWordLength(currentState.language);
         if (currentState.currentGuess.length < wordLength) {
-          const newState = {
-            ...currentState,
-            currentGuess: currentState.currentGuess + letter.toLowerCase(),
-          };
-          saveGameState(newState);
-          set({ gameState: newState });
+          set({
+            gameState: {
+              ...currentState,
+              currentGuess: currentState.currentGuess + letter.toLowerCase(),
+            },
+          });
         }
       },
 
       removeLetter: () => {
-        const { gameState, isAnimating, checkAndRefreshDaily } = get();
-        checkAndRefreshDaily();
-        const currentState = get().gameState;
+        const { isAnimating, refreshDailyIfNeeded } = get();
+        refreshDailyIfNeeded();
 
+        const currentState = get().gameState;
         if (isAnimating || currentState.gameStatus !== 'playing') return;
 
         if (currentState.currentGuess.length > 0) {
-          const newState = {
-            ...currentState,
-            currentGuess: currentState.currentGuess.slice(0, -1),
-          };
-          saveGameState(newState);
-          set({ gameState: newState });
+          set({
+            gameState: {
+              ...currentState,
+              currentGuess: currentState.currentGuess.slice(0, -1),
+            },
+          });
         }
       },
 
       submitGuess: () => {
-        const { statistics, isAnimating, setMessage, checkAndRefreshDaily } = get();
-        checkAndRefreshDaily();
-        const { gameState } = get();
+        const { statistics, isAnimating, setMessage, refreshDailyIfNeeded } = get();
+        refreshDailyIfNeeded();
 
+        const { gameState } = get();
         if (isAnimating || gameState.gameStatus !== 'playing') return;
 
         const wordLength = getWordLength(gameState.language);
@@ -263,7 +268,6 @@ export const useGameStore = create<GameStore>()(
           } else {
             set({ gameState: newState, isAnimating: false });
           }
-          saveGameState(newState);
         }, 1500);
       },
 
@@ -274,7 +278,6 @@ export const useGameStore = create<GameStore>()(
       resetGame: () => {
         const { gameState } = get();
         const newState = getInitialGameState(gameState.language);
-        saveGameState(newState);
         set({
           gameState: newState,
           showGameOver: false,
@@ -294,10 +297,13 @@ export const useGameStore = create<GameStore>()(
       clearMessage: () => set({ message: '' }),
     }),
     {
-      name: 'wordle-stats',
-      partialize: (state) => ({
-        statistics: state.statistics,
-      }),
+      name: 'wordle-store',
+      storage: createDateValidatedStorage() as any,
+      partialize: (state) =>
+        ({
+          gameState: state.gameState,
+          statistics: state.statistics,
+        }) as any,
     }
   )
 );
